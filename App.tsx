@@ -13,7 +13,7 @@ import {
     Plus, X, RefreshCw, Wand2, LayoutGrid,
     MoreVertical, Trash2, ChevronUp, ChevronDown, 
     SlidersHorizontal, Key, Github, Twitter,
-    Heart, ChevronLeft, ChevronRight, Download
+    Heart, ChevronLeft, ChevronRight, Download, MessageSquare
 } from './components/Icons';
 
 // Aspect Ratio Icon Helper
@@ -131,7 +131,23 @@ export default function App() {
       }
       
       setAllPresets(currentPresets);
-      loadGallery();
+      
+      const images = await getGallery();
+      setGallery(images);
+      
+      // Rehydrate tasks from gallery for persistent history
+      // Gallery is sorted desc (newest first), tasks are usually oldest first in the list view (appended)
+      const historyTasks: GenerationTask[] = images.map(img => ({
+          id: img.id,
+          batchId: img.batchId,
+          // Fix: status needs to be a specific literal, not string
+          status: 'success' as const,
+          aspectRatio: img.aspectRatio,
+          prompt: img.prompt,
+          data: img,
+          placeholder: false
+      })).reverse();
+      setTasks(historyTasks);
       
       const savedParams = localStorage.getItem('gp_params');
       if (savedParams) {
@@ -149,7 +165,11 @@ export default function App() {
   // Auto-scroll to bottom when tasks change
   useEffect(() => {
     if (activeTab === 'create' && tasks.length > 0) {
-        scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        // Only scroll if we added new tasks (naive check or just on every update)
+        // We use a small timeout to let DOM render
+        setTimeout(() => {
+            scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
     }
   }, [tasks.length, activeTab]);
 
@@ -364,7 +384,12 @@ export default function App() {
          finalPrompt = `${style.description}. ${effectivePrompt}`;
     }
 
-    const finalRefImages = [...(effectiveRefImages), ...(style?.referenceImages || [])];
+    // Fix: If retrying, do not re-append style images. Use provided refs as absolute truth.
+    // If not retrying, append style images to current input images.
+    const finalRefImages = retryRefImages 
+        ? retryRefImages 
+        : [...(effectiveRefImages), ...(style?.referenceImages || [])];
+
     const batchId = Date.now().toString();
     const newTasks: GenerationTask[] = [];
 
@@ -1007,8 +1032,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ... (rest of the file remains unchanged, modal code etc) ... */}
-      
       {/* --- Lightbox --- */}
       {lightboxState.isOpen && lightboxState.images.length > 0 && (
           <div className="fixed inset-0 z-[100] bg-black/98 backdrop-blur flex items-center justify-center animate-in fade-in duration-200" onClick={() => setLightboxState(prev => ({ ...prev, isOpen: false }))}>
@@ -1017,7 +1040,6 @@ export default function App() {
               <div 
                 className="relative max-w-full max-h-full p-4 md:p-12 flex items-center justify-center h-full w-full" 
                 onClick={(e) => {
-                    // Clicking image itself also closes it, as per request
                     setLightboxState(prev => ({ ...prev, isOpen: false }));
                 }}
               >
@@ -1025,7 +1047,10 @@ export default function App() {
                     src={lightboxState.images[lightboxState.currentIndex].url} 
                     alt={lightboxState.images[lightboxState.currentIndex].prompt} 
                     className="max-w-full max-h-full object-contain rounded-lg shadow-2xl cursor-zoom-out select-none"
-                    onClick={(e) => e.stopPropagation()} // Prevent bubble up if we wanted click-image-to-close to be unique, but here we want it to close too. Actually user said "click again to shrink".
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        setLightboxState(prev => ({ ...prev, isOpen: false }));
+                    }}
                   />
                   
                   {/* Close Button */}
@@ -1062,6 +1087,13 @@ export default function App() {
                             {lightboxState.images[lightboxState.currentIndex].prompt}
                         </p>
                         <div className="flex gap-2">
+                            <button 
+                                onClick={() => handleIterate(lightboxState.images[lightboxState.currentIndex])}
+                                className="p-3 bg-black/40 border border-white/10 rounded-full text-gray-400 hover:text-peach-400 hover:bg-white/10 transition-colors backdrop-blur-md"
+                                title="Iterate / Chat"
+                            >
+                                <MessageSquare size={20} />
+                            </button>
                             <button
                                 onClick={() => handleToggleFavorite(lightboxState.images[lightboxState.currentIndex])}
                                 className={`p-3 rounded-full backdrop-blur-md border transition-colors ${
