@@ -14,15 +14,18 @@ interface GenerateImageOptions {
 export const generateSingleImage = async (options: GenerateImageOptions): Promise<string> => {
   const { prompt, referenceImages, aspectRatio, resolution, apiKey, baseUrl } = options;
 
-  if (!apiKey) {
+  // Sanitize API Key to remove potential non-ASCII characters or whitespace that cause header errors
+  const sanitizedApiKey = apiKey?.trim();
+
+  if (!sanitizedApiKey) {
     throw new Error("API Key is required");
   }
 
   // Initialize with user provided key and optional base URL
   // We treat baseUrl as a constructor option if provided, defaulting to standard behavior if not
-  const clientOptions: any = { apiKey };
-  if (baseUrl) {
-    clientOptions.baseUrl = baseUrl;
+  const clientOptions: any = { apiKey: sanitizedApiKey };
+  if (baseUrl && baseUrl.trim()) {
+    clientOptions.baseUrl = baseUrl.trim();
   }
   
   const ai = new GoogleGenAI(clientOptions);

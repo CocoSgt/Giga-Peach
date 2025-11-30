@@ -16,17 +16,19 @@ import {
 } from './components/Icons';
 
 // Aspect Ratio Icon Helper
-const AspectRatioIcon = ({ ratio, active }: { ratio: AspectRatio, active: boolean }) => {
+const AspectRatioIcon = ({ ratio, active, orientation }: { ratio: AspectRatio, active: boolean, orientation: 'portrait' | 'landscape' }) => {
     const [w, h] = ratio.split(':').map(Number);
-    // Increased max dimensions for better visibility
-    const maxDim = 28;
+    const maxDim = 24; // Fixed dimension size
     let width, height;
-    if (w > h) {
-        width = maxDim;
-        height = (h / w) * maxDim;
-    } else {
+
+    if (orientation === 'portrait') {
+        // Fixed Height, Variable Width
         height = maxDim;
         width = (w / h) * maxDim;
+    } else {
+        // Fixed Width, Variable Height
+        width = maxDim;
+        height = (h / w) * maxDim;
     }
 
     return (
@@ -63,7 +65,7 @@ export default function App() {
   });
 
   // Inputs
-  const [prompt, setPrompt] = useState('A crystal glass sculpture of a giant peach, glowing from within, cinematic lighting, 8k');
+  const [prompt, setPrompt] = useState('A giga peach, hand-drawn crayon style, rough texture, thick black outlines, big round eyes, cute simple face, solid vivid blue background');
   const [selectedStyleId, setSelectedStyleId] = useState<string>('none');
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
   
@@ -102,14 +104,28 @@ export default function App() {
     if (savedBaseUrl) setBaseUrl(savedBaseUrl);
 
     initDB().then(async () => {
-      // Migrate/Update Default Preset
+      // 1. Migrate/Update Default Preset
       const defaultPresetDef = DEFAULT_PRESETS.find(p => p.id === 'none');
       if (defaultPresetDef) {
           await savePreset(defaultPresetDef);
       }
 
+      // 2. Merge missing defaults (Migration for existing users)
+      let currentPresets = await getAllPresets();
+      const existingIds = new Set(currentPresets.map(p => p.id));
+      const missingDefaults = DEFAULT_PRESETS.filter(p => !existingIds.has(p.id));
+      
+      if (missingDefaults.length > 0) {
+          console.log("Seeding missing default presets:", missingDefaults.map(p => p.name));
+          for (const p of missingDefaults) {
+              await savePreset(p);
+          }
+          // Reload after merge
+          currentPresets = await getAllPresets();
+      }
+      
+      setAllPresets(currentPresets);
       loadGallery();
-      refreshPresets();
       
       const savedParams = localStorage.getItem('gp_params');
       if (savedParams) {
@@ -173,7 +189,7 @@ export default function App() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, isStyle = false) => {
     const files = e.target.files;
     if (files && files.length > 0) {
-      Array.from(files).forEach(file => {
+      Array.from(files).forEach((file: File) => {
           const reader = new FileReader();
           reader.onloadend = () => {
             const result = reader.result as string;
@@ -217,7 +233,7 @@ export default function App() {
                     setReferenceImages(prev => [...prev, result]);
                 }
             };
-            reader.readAsDataURL(file as Blob);
+            reader.readAsDataURL(file);
             e.preventDefault();
         }
       }
@@ -453,7 +469,7 @@ export default function App() {
                 <a href="https://x.com/CocoSgt_twt" target="_blank" rel="noopener noreferrer" className="text-gray-600 hover:text-peach-400 transition-colors">
                     <Twitter size={16} />
                 </a>
-                <a href="https://github.com/cocosgt" target="_blank" rel="noopener noreferrer" className="text-gray-600 hover:text-peach-400 transition-colors">
+                <a href="https://github.com/CocoSgt/Giga-Peach" target="_blank" rel="noopener noreferrer" className="text-gray-600 hover:text-peach-400 transition-colors">
                     <Github size={16} />
                 </a>
                 <div className="h-4 w-px bg-gray-800"></div>
@@ -566,8 +582,8 @@ export default function App() {
                     </div>
                 ) : (
                     <div className="h-[60vh] flex flex-col items-center justify-center text-gray-600 space-y-6 animate-in fade-in zoom-in duration-700">
-                        <div className="p-6 rounded-full bg-gray-900/50 border border-gray-800 shadow-[0_0_30px_rgba(255,127,80,0.1)]">
-                            <span className="text-6xl select-none grayscale opacity-80">🍑</span>
+                        <div className="p-6 rounded-full bg-gray-900/50 border border-gray-800 shadow-[0_0_30px_rgba(255,127,80,0.2)]">
+                            <span className="text-6xl select-none drop-shadow-[0_0_15px_rgba(255,127,80,0.5)] filter-none opacity-100">🍑</span>
                         </div>
                         <div className="text-center space-y-3">
                             <h3 className="text-2xl font-semibold text-gray-300">Batch Generate • Multi-Ratio • Style Transfer</h3>
@@ -631,12 +647,12 @@ export default function App() {
                                 <div className="grid grid-cols-5 gap-2">
                                     {portraitRatios.map(ratio => (
                                         <div key={ratio} onClick={() => toggleRatio(ratio)} className="h-14">
-                                            <AspectRatioIcon ratio={ratio} active={params.aspectRatios.includes(ratio)} />
+                                            <AspectRatioIcon ratio={ratio} active={params.aspectRatios.includes(ratio)} orientation="portrait" />
                                         </div>
                                     ))}
                                     {landscapeRatios.map(ratio => (
                                         <div key={ratio} onClick={() => toggleRatio(ratio)} className="h-14">
-                                            <AspectRatioIcon ratio={ratio} active={params.aspectRatios.includes(ratio)} />
+                                            <AspectRatioIcon ratio={ratio} active={params.aspectRatios.includes(ratio)} orientation="landscape" />
                                         </div>
                                     ))}
                                 </div>
