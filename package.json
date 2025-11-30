@@ -15,7 +15,8 @@
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "lucide-react": "^0.378.0"
+    "lucide-react": "^0.378.0",
+    "@vercel/analytics": "^1.4.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.1",
