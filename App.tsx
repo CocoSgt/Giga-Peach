@@ -4,7 +4,7 @@ import {
     GenerationTask, Resolution, AspectRatio 
 } from './types';
 import { ASPECT_RATIOS, DEFAULT_PRESETS } from './constants';
-import { initDB, saveImage, getGallery, deleteImage, savePreset, getAllPresets, deletePreset } from './services/storage';
+import { initDB, saveImage, getPaginatedGallery, deleteImage, savePreset, getAllPresets, deletePreset, clearGallery } from './services/storage';
 import { generateSingleImage } from './services/gemini';
 import { ImageCard } from './components/ImageCard';
 import { Modal } from './components/Modal';
@@ -13,8 +13,11 @@ import {
     Plus, X, RefreshCw, Wand2, LayoutGrid,
     MoreVertical, Trash2, ChevronUp, ChevronDown, 
     SlidersHorizontal, Key, Github, Twitter,
-    Heart, ChevronLeft, ChevronRight, Download, MessageSquare
+    Heart, ChevronLeft, ChevronRight, Download, MessageSquare, AlertTriangle, CornerUpLeft
 } from './components/Icons';
+
+// Reduced page size to improve performance and reduce lag
+const PAGE_SIZE = 12;
 
 // Aspect Ratio Icon Helper
 const AspectRatioIcon = ({ ratio, active, orientation }: { ratio: AspectRatio, active: boolean, orientation: 'portrait' | 'landscape' }) => {
@@ -49,6 +52,12 @@ const AspectRatioIcon = ({ ratio, active, orientation }: { ratio: AspectRatio, a
     );
 };
 
+// Date Formatter
+const formatTimestamp = (ts: number) => {
+    const d = new Date(ts);
+    return `${d.getFullYear()}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getDate().toString().padStart(2,'0')} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+};
+
 export default function App() {
   // --- Auth State ---
   const [apiKey, setApiKey] = useState('');
@@ -75,12 +84,12 @@ export default function App() {
 
   // Data
   const [allPresets, setAllPresets] = useState<StylePreset[]>([]);
-  const [tasks, setTasks] = useState<GenerationTask[]>([]); // Current session tasks
+  const [tasks, setTasks] = useState<GenerationTask[]>([]); // Current session + loaded history
   const [gallery, setGallery] = useState<GeneratedImage[]>([]);
   
-  // Lazy Loading State
-  const [historyLimit, setHistoryLimit] = useState(5); // Start with 5 batches
-  const [galleryLimit, setGalleryLimit] = useState(24); // Start with 24 images
+  // Dynamic Loading State
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [galleryHasMore, setGalleryHasMore] = useState(true);
   
   // UI - Lightbox
   const [lightboxState, setLightboxState] = useState<{
@@ -124,36 +133,33 @@ export default function App() {
           await savePreset(defaultPresetDef);
       }
 
-      // 2. Merge missing defaults (Migration for existing users)
+      // 2. Merge missing defaults
       let currentPresets = await getAllPresets();
       const existingIds = new Set(currentPresets.map(p => p.id));
       const missingDefaults = DEFAULT_PRESETS.filter(p => !existingIds.has(p.id));
       
       if (missingDefaults.length > 0) {
-          console.log("Seeding missing default presets:", missingDefaults.map(p => p.name));
           for (const p of missingDefaults) {
               await savePreset(p);
           }
-          // Reload after merge
           currentPresets = await getAllPresets();
       }
-      
       setAllPresets(currentPresets);
       
-      const images = await getGallery();
-      setGallery(images);
+      // 3. Initial Load - load smaller batch to prevent lag
+      const recentImages = await getPaginatedGallery(PAGE_SIZE);
+      setGallery(recentImages);
       
-      // Rehydrate tasks from gallery for persistent history
-      // Gallery is sorted desc (newest first), tasks are usually oldest first in the list view (appended)
-      const historyTasks: GenerationTask[] = images.map(img => ({
+      // Initialize tasks from recent history (reversing to correct order for task view)
+      const historyTasks: GenerationTask[] = recentImages.map(img => ({
           id: img.id,
           batchId: img.batchId,
-          // Fix: status needs to be a specific literal, not string
           status: 'success' as const,
           aspectRatio: img.aspectRatio,
           prompt: img.prompt,
           data: img,
-          placeholder: false
+          placeholder: false,
+          referenceImages: img.referenceImages
       })).reverse();
       setTasks(historyTasks);
       
@@ -171,13 +177,21 @@ export default function App() {
   }, [params]);
 
   // Auto-scroll to bottom when NEW tasks are added (Create mode)
-  // We track tasks.length to only scroll when count increases
   const prevTaskLengthRef = useRef(0);
   useEffect(() => {
+    // Only scroll if we added tasks and they are new (at the end)
     if (activeTab === 'create' && tasks.length > prevTaskLengthRef.current) {
-        setTimeout(() => {
-            scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-        }, 100);
+        // Small check to ensure we don't scroll when loading history (prepending)
+        // But since we use .reverse() for initial load, prepending usually happens by user action.
+        // For simple auto-scroll on generate:
+        const lastTask = tasks[tasks.length - 1];
+        const isNew = lastTask && lastTask.status !== 'success'; // Crude check for generation
+        
+        if (isNew) {
+            setTimeout(() => {
+                scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, 100);
+        }
     }
     prevTaskLengthRef.current = tasks.length;
   }, [tasks.length, activeTab]);
@@ -186,7 +200,6 @@ export default function App() {
   useEffect(() => {
       if (promptInputRef.current) {
           promptInputRef.current.style.height = 'auto';
-          // Let CSS max-height handle the scrolling limit
           promptInputRef.current.style.height = `${promptInputRef.current.scrollHeight}px`;
       }
   }, [prompt]);
@@ -209,62 +222,130 @@ export default function App() {
       return () => window.removeEventListener('keydown', handleKeyDown);
   }, [lightboxState.isOpen, lightboxState.currentIndex, lightboxState.images.length]);
 
-  // --- Lazy Load Logic ---
+  // --- Dynamic Load Logic ---
 
-  // History Observer (Scroll UP to load older)
-  useEffect(() => {
-      if (activeTab !== 'create') return;
-      
-      if (historyTopObserver.current) historyTopObserver.current.disconnect();
+  const loadMoreGallery = async () => {
+    if (isLoadingMore || !galleryHasMore) return;
+    setIsLoadingMore(true);
 
-      historyTopObserver.current = new IntersectionObserver((entries) => {
-          if (entries[0].isIntersecting) {
-              setHistoryLimit(prev => prev + 5);
-          }
-      }, { rootMargin: '200px' });
+    try {
+        const lastImage = gallery[gallery.length - 1];
+        const lastTimestamp = lastImage?.timestamp;
+        
+        // Load next batch
+        const moreImages = await getPaginatedGallery(PAGE_SIZE, lastTimestamp);
+        
+        if (moreImages.length === 0) {
+            setGalleryHasMore(false);
+        } else {
+            setGallery(prev => [...prev, ...moreImages]);
+        }
+    } catch (error) {
+        console.error("Failed to load more gallery images", error);
+    } finally {
+        setIsLoadingMore(false);
+    }
+  };
 
-      if (historySentinelRef.current) {
-          historyTopObserver.current.observe(historySentinelRef.current);
-      }
+  const loadMoreHistory = async () => {
+    // For the Create tab, we want to load items OLDER than the oldest currently shown task.
+    // Tasks are displayed bottom-up (newest at bottom usually), but our task list is [old...new].
+    // So the "top" of the list is tasks[0].
+    if (isLoadingMore) return;
+    setIsLoadingMore(true);
 
-      return () => historyTopObserver.current?.disconnect();
-  }, [activeTab, tasks.length]); // Re-attach when list size changes potentially
+    try {
+        const firstTask = tasks[0];
+        const oldestTimestamp = firstTask?.data?.timestamp;
+
+        if (!oldestTimestamp) {
+             setIsLoadingMore(false);
+             return;
+        }
+
+        const moreImages = await getPaginatedGallery(PAGE_SIZE, oldestTimestamp);
+        
+        if (moreImages.length > 0) {
+            const historyTasks: GenerationTask[] = moreImages.map(img => ({
+                id: img.id,
+                batchId: img.batchId,
+                status: 'success' as const,
+                aspectRatio: img.aspectRatio,
+                prompt: img.prompt,
+                data: img,
+                placeholder: false,
+                referenceImages: img.referenceImages
+            })).reverse();
+            
+            setTasks(prev => [...historyTasks, ...prev]);
+        }
+    } catch(e) {
+        console.error("Failed to load history", e);
+    } finally {
+        setIsLoadingMore(false);
+    }
+  };
 
   // Gallery Observer (Scroll DOWN to load newer)
   useEffect(() => {
-    if (activeTab === 'create') return;
-
+    if (activeTab !== 'gallery') return;
     if (galleryBottomObserver.current) galleryBottomObserver.current.disconnect();
 
     galleryBottomObserver.current = new IntersectionObserver((entries) => {
         if (entries[0].isIntersecting) {
-            setGalleryLimit(prev => prev + 24);
+            loadMoreGallery();
         }
-    }, { rootMargin: '200px' });
+    }, { rootMargin: '400px' });
 
     if (gallerySentinelRef.current) {
         galleryBottomObserver.current.observe(gallerySentinelRef.current);
     }
 
     return () => galleryBottomObserver.current?.disconnect();
-  }, [activeTab, gallery.length]);
+  }, [activeTab, gallery.length, isLoadingMore]);
 
-  // Reset limits on tab switch
+  // History Observer (Scroll UP to load older in Create Tab)
   useEffect(() => {
-      // Optional: Reset limit or keep state? Keeping state might be nicer for UX, 
-      // but let's be safe for performance.
-      // Actually, keeping separate state variables handles this.
-  }, [activeTab]);
+    if (activeTab !== 'create') return;
+    if (historyTopObserver.current) historyTopObserver.current.disconnect();
 
+    historyTopObserver.current = new IntersectionObserver((entries) => {
+        if (entries[0].isIntersecting) {
+            loadMoreHistory();
+        }
+    }, { rootMargin: '200px' });
 
-  const loadGallery = async () => {
-    const images = await getGallery();
-    setGallery(images);
-  };
+    if (historySentinelRef.current) {
+        historyTopObserver.current.observe(historySentinelRef.current);
+    }
+
+    return () => historyTopObserver.current?.disconnect();
+  }, [activeTab, tasks.length, isLoadingMore]);
 
   const refreshPresets = async () => {
       const presets = await getAllPresets();
       setAllPresets(presets);
+  };
+
+  const handleClearAllData = async () => {
+      if (window.confirm("Are you sure you want to clear all generated images? This cannot be undone.")) {
+          try {
+            // 1. Clear IndexedDB
+            await clearGallery();
+            
+            // 2. Clear Local State Immediately
+            setTasks([]);
+            setGallery([]);
+            
+            // 3. Reload after a short delay to ensure clean state
+            setTimeout(() => {
+                 window.location.reload();
+            }, 500);
+          } catch(e) {
+              console.error("Failed to clear gallery", e);
+              alert("Failed to clear data completely. Please try again.");
+          }
+      }
   };
 
   // --- Handlers ---
@@ -441,8 +522,6 @@ export default function App() {
          finalPrompt = `${style.description}. ${effectivePrompt}`;
     }
 
-    // Fix: If retrying, do not re-append style images. Use provided refs as absolute truth.
-    // If not retrying, append style images to current input images.
     const finalRefImages = retryRefImages 
         ? retryRefImages 
         : [...(effectiveRefImages), ...(style?.referenceImages || [])];
@@ -458,7 +537,8 @@ export default function App() {
                 status: 'pending',
                 aspectRatio: ratio,
                 prompt: finalPrompt,
-                placeholder: true
+                placeholder: true,
+                referenceImages: finalRefImages // Persist inputs immediately
             });
         }
     });
@@ -491,13 +571,16 @@ export default function App() {
 
             await saveImage(generatedData);
             
+            // Add to tasks
             setTasks(prev => prev.map(t => t.id === task.id ? { 
                 ...t, 
                 status: 'success', 
                 data: generatedData 
             } : t));
+            
+            // Add to gallery (newest first)
+            setGallery(prev => [generatedData, ...prev]);
 
-            loadGallery();
         })
         .catch(err => {
             setTasks(prev => prev.map(t => t.id === task.id ? { 
@@ -522,13 +605,54 @@ export default function App() {
       setLightboxState(prev => ({ ...prev, isOpen: false }));
   };
 
+  const handleReuse = (taskData: GeneratedImage) => {
+      // 1. Identify Style
+      const styleId = taskData.styleId || 'none';
+      const style = allPresets.find(p => p.id === styleId);
+      
+      // 2. Parse Prompt (Try to strip style prefix if it exists)
+      let newPrompt = taskData.prompt;
+      if (style && style.description) {
+          const prefix = `${style.description}. `;
+          const cleanDesc = style.description.trim();
+          
+          if (newPrompt.startsWith(prefix)) {
+              newPrompt = newPrompt.substring(prefix.length);
+          } else if (newPrompt.startsWith(cleanDesc)) {
+               newPrompt = newPrompt.substring(cleanDesc.length).trim();
+               // Clean up any leading dots or spaces remaining
+               if(newPrompt.startsWith('.')) newPrompt = newPrompt.substring(1).trim();
+          }
+      }
+
+      // 3. Parse Images (Try to strip style images)
+      let newImages = taskData.referenceImages || [];
+      if (style && style.referenceImages && style.referenceImages.length > 0) {
+          newImages = newImages.filter(img => 
+              !style.referenceImages?.some(styleImg => styleImg === img)
+          );
+      }
+
+      // 4. Set State
+      setSelectedStyleId(styleId);
+      setPrompt(newPrompt);
+      setReferenceImages(newImages);
+      setActiveTab('create');
+      
+      // Focus
+      setTimeout(() => {
+          promptInputRef.current?.focus();
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+      }, 100);
+  };
+
   const handleDeleteTask = (id: string) => {
       setTasks(prev => prev.filter(t => t.id !== id));
   };
 
   const handleDeleteGallery = async (id: string) => {
       await deleteImage(id);
-      loadGallery();
+      setGallery(prev => prev.filter(g => g.id !== id));
       // If deleted in lightbox, close or switch
       if (lightboxState.isOpen && lightboxState.images[lightboxState.currentIndex]?.id === id) {
           setLightboxState(prev => ({ ...prev, isOpen: false }));
@@ -537,30 +661,28 @@ export default function App() {
   
   const handleRegenerateBatch = (batchTasks: GenerationTask[]) => {
       if (batchTasks.length === 0) return;
-      const firstPrompt = batchTasks[0].prompt;
+      const firstTask = batchTasks[0];
       const firstData = batchTasks.find(t => t.data)?.data;
-      if (firstData) {
-        handleGenerate(firstData.prompt, firstData.referenceImages);
-      } else {
-        handleGenerate(firstPrompt);
-      }
+      
+      // Prioritize data from successful generation, fall back to task metadata (for retrying failed jobs)
+      const promptToUse = firstData?.prompt || firstTask.prompt;
+      const refsToUse = firstData?.referenceImages || firstTask.referenceImages;
+      
+      handleGenerate(promptToUse, refsToUse);
   };
 
   // --- Lightbox Logic ---
   
   const openLightbox = (image: GeneratedImage, sourceList?: GeneratedImage[]) => {
-      // Determine the list context
       let list = sourceList;
       if (!list) {
-          // Fallback context based on active tab
           if (activeTab === 'gallery') list = gallery;
           else if (activeTab === 'favorites') list = gallery.filter(img => img.isFavorite);
           else {
-              // Create tab: flatten current tasks with data
               list = tasks
                   .filter(t => t.status === 'success' && t.data)
                   .map(t => t.data!)
-                  .reverse(); // Assuming typical reverse chrono order in UI
+                  .reverse();
           }
       }
       
@@ -628,12 +750,8 @@ export default function App() {
   };
 
   const groupedTasks = groupTasksByBatch(tasks);
-  
-  // Calculate Display Lists for Lazy Loading
-  const visibleHistoryGroups = groupedTasks.slice(-historyLimit); // Show last N batches
   const favoriteImages = gallery.filter(img => img.isFavorite);
   const targetGalleryList = activeTab === 'favorites' ? favoriteImages : gallery;
-  const visibleGalleryImages = targetGalleryList.slice(0, galleryLimit); // Show first N images
 
   return (
     <div className="flex flex-col h-screen bg-black text-gray-100 font-sans selection:bg-peach-500/30">
@@ -703,14 +821,14 @@ export default function App() {
                     <span className="flex items-center gap-2"><Sparkles size={18}/> <span className="hidden sm:inline">Create</span></span>
                 </button>
                 <button 
-                    onClick={() => { setActiveTab('gallery'); loadGallery(); }}
+                    onClick={() => setActiveTab('gallery')}
                     className={`px-4 md:px-5 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'gallery' ? 'bg-gray-800 text-white shadow-sm ring-1 ring-gray-700' : 'text-gray-400 hover:text-gray-200'}`}
                     title="Gallery"
                 >
                     <span className="flex items-center gap-2"><History size={18}/> <span className="hidden sm:inline">Gallery</span></span>
                 </button>
                 <button 
-                    onClick={() => { setActiveTab('favorites'); loadGallery(); }}
+                    onClick={() => setActiveTab('favorites')}
                     className={`px-4 md:px-5 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'favorites' ? 'bg-gray-800 text-white shadow-sm ring-1 ring-gray-700' : 'text-gray-400 hover:text-gray-200'}`}
                     title="Collection"
                 >
@@ -721,7 +839,7 @@ export default function App() {
       </header>
 
       {/* --- Main Content --- */}
-      <main className="flex-1 overflow-y-auto pt-28 pb-48 px-4 md:px-8 scrollbar-thin scrollbar-thumb-gray-800">
+      <main className="flex-1 overflow-y-auto pt-20 pb-36 px-4 md:px-8 scrollbar-thin scrollbar-thumb-gray-800">
         
         {/* CREATE TAB */}
         {activeTab === 'create' && (
@@ -729,13 +847,11 @@ export default function App() {
                 {groupedTasks.length > 0 ? (
                     <div className="space-y-20 pb-12">
                         {/* Sentinel for lazy loading history */}
-                        {groupedTasks.length > historyLimit && (
-                            <div ref={historySentinelRef} className="h-10 flex items-center justify-center">
-                                <div className="w-6 h-6 border-2 border-peach-500/30 border-t-peach-500 rounded-full animate-spin"></div>
-                            </div>
-                        )}
+                        <div ref={historySentinelRef} className="h-10 flex items-center justify-center text-gray-700 text-xs uppercase tracking-wider">
+                           {isLoadingMore && <div className="w-5 h-5 border-2 border-peach-500/30 border-t-peach-500 rounded-full animate-spin"></div>}
+                        </div>
 
-                        {visibleHistoryGroups.map((batch, index) => {
+                        {groupedTasks.map((batch, index) => {
                             const firstItem = batch[0];
                             const refData = batch.find(t => t.data)?.data;
                             const promptText = firstItem.prompt;
@@ -743,27 +859,43 @@ export default function App() {
                             const styleId = refData?.styleId || selectedStyleId;
                             const styleName = allPresets.find(p => p.id === styleId)?.name || 'Custom';
                             const ratioGroups = groupTasksByRatio(batch);
+                            
+                            // Use stored references if generation is pending/failed (fallback to data if success)
+                            const displayRefs = refData?.referenceImages || firstItem.referenceImages;
+                            const hasRefs = displayRefs && displayRefs.length > 0;
 
                             return (
                                 <div key={firstItem.batchId || index} className="group relative animate-in fade-in slide-in-from-bottom-4 duration-500">
                                     <div className="absolute -left-8 top-6 bottom-0 w-px bg-gradient-to-b from-peach-500/50 to-transparent hidden md:block opacity-30"></div>
-                                    <div className="mb-8 pl-0 md:pl-4">
-                                        {/* Updated Typography for better readability */}
+                                    <div className="mb-8">
+                                        {/* Prompt & Meta */}
                                         <p className="text-white text-lg md:text-xl font-normal leading-relaxed max-w-5xl tracking-wide">{promptText}</p>
-                                        <div className="flex flex-wrap items-center gap-4 mt-3 text-sm text-gray-400 font-mono uppercase tracking-wider">
-                                             <span className="text-peach-400 font-bold">
-                                                 {new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                        
+                                        {/* Reference Images in History */}
+                                        {hasRefs && (
+                                            <div className="flex gap-2 mt-3 overflow-x-auto pb-2 scrollbar-thin max-w-2xl">
+                                                {displayRefs!.map((img, i) => (
+                                                     <div key={i} className="relative w-12 h-12 flex-shrink-0 rounded-md overflow-hidden border border-gray-700 bg-gray-900 group/ref" title="Reference Image">
+                                                        <img src={img} className="w-full h-full object-cover opacity-80 group-hover/ref:opacity-100 transition-opacity" alt="ref" />
+                                                     </div>
+                                                ))}
+                                            </div>
+                                        )}
+
+                                        <div className="flex flex-wrap items-center gap-4 mt-2 text-sm text-gray-500 font-mono">
+                                             <span className="text-gray-600 font-medium text-xs select-none">
+                                                 {formatTimestamp(timestamp)}
                                              </span>
                                              <span>•</span>
                                              {styleId && styleId !== 'none' && (
                                                 <>
-                                                    <span className="flex items-center gap-1 text-gray-300 font-medium">
+                                                    <span className="flex items-center gap-1 text-gray-400 font-medium uppercase tracking-wider text-xs">
                                                         {styleName}
                                                     </span>
                                                     <span>•</span>
                                                 </>
                                              )}
-                                             <span className="text-gray-300">{params.resolution}</span>
+                                             <span className="text-gray-400 text-xs uppercase tracking-wider">{params.resolution}</span>
                                         </div>
                                     </div>
 
@@ -771,7 +903,6 @@ export default function App() {
                                         {Object.entries(ratioGroups).map(([ratio, groupTasks]) => (
                                             <div key={ratio} className="space-y-3">
                                                 <div className="text-xs uppercase font-bold text-gray-500 pl-1 tracking-widest">{ratio}</div>
-                                                {/* Bigger Grid: md:grid-cols-3, lg:grid-cols-4 instead of 4/5 */}
                                                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 xl:gap-6">
                                                     {groupTasks.map(task => (
                                                         <div key={task.id} className="transform transition-all duration-500 hover:scale-[1.01]">
@@ -789,7 +920,18 @@ export default function App() {
                                         ))}
                                     </div>
                                     
-                                    <div className="mt-6 flex justify-end opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                                    {/* Action Buttons */}
+                                    <div className="mt-6 flex justify-end gap-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                                        {refData && (
+                                            <button 
+                                                onClick={() => handleReuse(refData)}
+                                                className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors bg-gray-800/50 hover:bg-gray-800 px-4 py-2 rounded-full border border-gray-700"
+                                                title="Edit & Run"
+                                            >
+                                                <CornerUpLeft size={14} />
+                                                <span>Reuse</span>
+                                            </button>
+                                        )}
                                         <button 
                                             onClick={() => handleRegenerateBatch(batch)}
                                             className="flex items-center gap-2 text-sm text-peach-500 hover:text-peach-400 transition-colors bg-peach-500/10 px-4 py-2 rounded-full border border-peach-500/20"
@@ -801,7 +943,22 @@ export default function App() {
                                 </div>
                             );
                         })}
-                         <div ref={scrollEndRef} className="h-8" /> 
+
+                        {/* Clear Data Button (Bottom of Chat) */}
+                        <div className="flex flex-col items-center justify-center pt-12 pb-8 gap-3 opacity-60 hover:opacity-100 transition-opacity">
+                            <button 
+                                onClick={(e) => {
+                                    e.currentTarget.blur();
+                                    handleClearAllData();
+                                }}
+                                className="flex items-center gap-2 px-4 py-2 text-xs font-medium text-red-400 bg-red-900/10 hover:bg-red-900/20 border border-red-900/20 rounded-full transition-all"
+                            >
+                                <Trash2 size={14} />
+                                <span>Clear All History</span>
+                            </button>
+                        </div>
+                         
+                        <div ref={scrollEndRef} className="h-8" /> 
                     </div>
                 ) : (
                     <div className="h-[65vh] flex flex-col items-center justify-center text-gray-600 space-y-8 animate-in fade-in zoom-in duration-700">
@@ -820,9 +977,8 @@ export default function App() {
         {/* GALLERY & FAVORITES TAB */}
         {(activeTab === 'gallery' || activeTab === 'favorites') && (
             <div className="max-w-[1800px] mx-auto">
-                 {/* Bigger Columns for Gallery too */}
                  <div className="columns-1 md:columns-2 lg:columns-3 xl:columns-4 gap-4 xl:gap-6 space-y-4 xl:space-y-6">
-                    {visibleGalleryImages.map(img => (
+                    {targetGalleryList.map(img => (
                         <div key={img.id} className="break-inside-avoid">
                             <ImageCard 
                                 task={{
@@ -839,16 +995,37 @@ export default function App() {
                             />
                         </div>
                     ))}
-                    {targetGalleryList.length === 0 && (
+                    {targetGalleryList.length === 0 && !isLoadingMore && (
                         <div className="col-span-full text-center py-32 text-gray-500 text-lg">
                             {activeTab === 'favorites' ? 'No favorites yet.' : 'Gallery is empty.'}
                         </div>
                     )}
                 </div>
+
+                {/* Clear Data Button (Bottom of Gallery) */}
+                {activeTab === 'gallery' && gallery.length > 0 && !isLoadingMore && (
+                     <div className="py-16 flex flex-col items-center justify-center border-t border-gray-900 mt-12 gap-3">
+                         <div className="flex items-center gap-2 text-gray-500 text-sm">
+                            <AlertTriangle size={16} className="text-gray-600" />
+                            <span>Performance or storage issues?</span>
+                         </div>
+                         <button 
+                            onClick={handleClearAllData}
+                            className="flex items-center gap-2 px-6 py-2.5 bg-gray-900 hover:bg-red-900/20 border border-gray-800 hover:border-red-900/30 text-gray-400 hover:text-red-300 rounded-full transition-all text-sm group"
+                         >
+                             <Trash2 size={16} className="group-hover:text-red-400 transition-colors" />
+                             Clear Website Data
+                         </button>
+                         <p className="text-[10px] text-gray-600">
+                            Keeps API Key & Presets.
+                         </p>
+                     </div>
+                )}
+
                 {/* Sentinel for lazy loading gallery */}
-                {visibleGalleryImages.length < targetGalleryList.length && (
+                {(galleryHasMore && activeTab === 'gallery') && (
                     <div ref={gallerySentinelRef} className="h-20 flex items-center justify-center mt-8">
-                        <div className="w-8 h-8 border-2 border-peach-500/30 border-t-peach-500 rounded-full animate-spin"></div>
+                        {isLoadingMore && <div className="w-8 h-8 border-2 border-peach-500/30 border-t-peach-500 rounded-full animate-spin"></div>}
                     </div>
                 )}
             </div>
@@ -867,7 +1044,7 @@ export default function App() {
                         showConfig ? 'max-h-[600px] opacity-100 scale-100' : 'max-h-0 opacity-0 scale-95'
                     }`}
                 >
-                    <div className="p-6 space-y-6 relative">
+                    <div className="p-6 space-y-6 relative overflow-y-auto max-h-[500px] custom-scrollbar">
                         {/* Close Button */}
                         <button 
                             onClick={() => setShowConfig(false)}

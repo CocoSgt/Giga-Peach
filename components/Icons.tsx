@@ -3,7 +3,7 @@ import {
   Trash2, X, Maximize2, RefreshCw, MessageSquare, 
   LayoutGrid, History, Wand2, Share2, MoreVertical,
   ChevronUp, ChevronDown, SlidersHorizontal, Key, Github, Twitter,
-  Heart, ChevronLeft, ChevronRight
+  Heart, ChevronLeft, ChevronRight, AlertTriangle, CornerUpLeft
 } from 'lucide-react';
 
 export { 
@@ -11,5 +11,5 @@ export {
   Trash2, X, Maximize2, RefreshCw, MessageSquare, 
   LayoutGrid, History, Wand2, Share2, MoreVertical,
   ChevronUp, ChevronDown, SlidersHorizontal, Key, Github, Twitter,
-  Heart, ChevronLeft, ChevronRight
+  Heart, ChevronLeft, ChevronRight, AlertTriangle, CornerUpLeft
 };

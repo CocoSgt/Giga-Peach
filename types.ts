@@ -39,6 +39,7 @@ export interface GenerationTask {
   placeholder?: boolean;
   data?: GeneratedImage;
   error?: string;
+  referenceImages?: string[]; // Store inputs immediately for UI display and retry
 }
 
 export interface ChatSession {
