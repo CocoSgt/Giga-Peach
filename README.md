@@ -24,6 +24,16 @@ Giga Peach is a professional-grade, multi-modal AI image generation tool designe
 4.  Enter your Google Gemini API Key. (Get one [here](https://aistudio.google.com/app/apikey)).
 5.  Start generating!
 
+## Security Notes
+
+- **API Key Storage**: Your API key is stored locally in your browser's `localStorage`. It is never sent to our servers.
+- **API Key Transmission**: API keys are transmitted securely via HTTP headers (not URL parameters) to prevent exposure in browser history or server logs.
+- **Privacy**: All data (API keys, generated images, presets) remains in your browser and is never uploaded to external servers.
+- **Best Practices**: 
+  - Never share your API key with others
+  - Regularly rotate your API key if you suspect it may have been compromised
+  - Use API key restrictions in Google Cloud Console to limit usage
+
 ## Technologies
 
 - **Frontend**: React 18, Tailwind CSS, Lucide Icons

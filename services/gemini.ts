@@ -23,7 +23,8 @@ export const generateSingleImage = async (options: GenerateImageOptions): Promis
   // Determine API Base URL
   const apiBase = baseUrl?.trim() || "https://generativelanguage.googleapis.com";
   // Use v1beta for the latest models like gemini-3-pro-image-preview
-  const url = `${apiBase}/v1beta/models/${MODEL_NAME}:generateContent?key=${sanitizedApiKey}`;
+  // API Key is passed via header instead of URL parameter for better security
+  const url = `${apiBase}/v1beta/models/${MODEL_NAME}:generateContent`;
 
   const parts: any[] = [];
   
@@ -66,6 +67,7 @@ export const generateSingleImage = async (options: GenerateImageOptions): Promis
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "x-goog-api-key": sanitizedApiKey,
       },
       body: JSON.stringify(payload),
     });
